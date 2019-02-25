@@ -223,7 +223,7 @@ function courseplay:turn(vehicle, dt)
 				local totalOffsetZ
 				if vehicle.cp.headlandTurn then
 					-- headland turns are not near 180 degrees so just moving the target left/right won't work. 
-					-- we must to move it back as well
+					-- we must move it back as well
 					totalOffsetZ = totalOffsetX / math.tan( turnInfo.deltaAngle / 2 )
 				else
 					totalOffsetZ = 0
@@ -371,6 +371,10 @@ function courseplay:turn(vehicle, dt)
 				-------------------------------------------------------------
 				courseplay:debug(string.format("%s:(Turn) Direction difference is %.1f, this is a corner, maneuver type = %d.",
 					nameNum(vehicle), turnInfo.directionChangeDeg, vehicle.cp.headland.reverseManeuverType), 14);
+				-- turn start waypoint is at vehicle.cp.waypointIndex, turn end is the next waypoint
+				turnInfo.turnHelper = TurnHelper(vehicle, vehicle.Waypoints[vehicle.cp.waypointIndex - 1].angle, vehicle.Waypoints[vehicle.cp.waypointIndex], vehicle.cp.waypointIndex,
+					vehicle.Waypoints[vehicle.cp.waypointIndex + 1], vehicle.cp.waypointIndex + 1, turnInfo.turnRadius)
+
 				if turnInfo.isHarvester then
 					if vehicle.cp.headland.reverseManeuverType == courseplay.HEADLAND_REVERSE_MANEUVER_TYPE_STRAIGHT then
 						courseplay.generateTurnTypeHeadlandCornerReverseStraightCombine(vehicle, turnInfo)
@@ -380,7 +384,7 @@ function courseplay:turn(vehicle, dt)
 				else
 					courseplay.generateTurnTypeHeadlandCornerReverseStraightTractor(vehicle, turnInfo)
 				end
-
+				turnInfo.turnHelper:delete()
 			end
 
 			cpPrintLine(14, 1);
@@ -722,6 +726,7 @@ function courseplay:turn(vehicle, dt)
 		local x1, _, z1 = localToWorld( realDirectionNode, -1, 0, backMarker )
 		local x2, _, z2 = localToWorld( realDirectionNode, 1, 0, backMarker )
 		cpDebug:drawLine(x1, y + 5, z1, 1, 0, 0, x2, y + 5, z2);
+
 	end
 
 	----------------------------------------------------------
@@ -1686,27 +1691,15 @@ function courseplay.generateTurnTypeHeadlandCornerReverseStraightTractor(vehicle
 	cpPrintLine(14, 3);
 
 	local fromPoint, toPoint = {}, {};
-	local centerForward, startDir, stopDir = {}, {}, {}
 
-	--
-	-- create a helper node from turnTarget but this time rotated into the turnStart direction
-	local tx, _, tz = localToWorld( turnInfo.targetNode, 0, 0, 0 )
-	local turnStartNode = courseplay.createNode( "cpTurnStartNode", tx, tz, math.rad( turnInfo.startDirection ))
-	tx, _, tz = localToWorld( turnStartNode, 0, 0, 0 )
-	courseplay:debug(("%s:(Turn) courseplay:generateTurnTypeHeadlandCornerReverseStraightTractor(), turn target node is ( %.2f %.2f )"):format(
-		nameNum(vehicle), tx, tz ), 14)
-
-	-- get the center of the forward turning circle
-	turnInfo.turnRadius = turnInfo.turnRadius * 1.1
-	local deltaZC = turnInfo.turnRadius / math.abs( math.tan( turnInfo.deltaAngle / 2 ))
-	centerForward.x,_,centerForward.z = localToWorld(turnStartNode, - turnInfo.direction * turnInfo.turnRadius, 0, -deltaZC )
-	courseplay:debug(("%s:(Turn) courseplay:generateTurnTypeHeadlandCornerReverseStraightTractor(), fwdCircle( %.2f %.2f ), deltaAngle %.2f, deltaZC %.2f"):format(
-		nameNum(vehicle), centerForward.x, centerForward.z, math.deg( turnInfo.deltaAngle ), deltaZC ), 14);
+	local centerForward = turnInfo.turnHelper:getArcCenter()
+	courseplay:debug(("%s:(Turn) courseplay:generateTurnTypeHeadlandCornerReverseStraightTractor(), fwdCircle( %.2f %.2f ), deltaAngle %.2f"):format(
+		nameNum(vehicle), centerForward.x, centerForward.z, math.deg( turnInfo.deltaAngle )), 14);
 
 	-- drive forward until our implement reaches the headland after the turn
 	fromPoint.x, _, fromPoint.z = localToWorld( turnInfo.directionNode, 0, 0, 0 )
 	-- we want the work area of our implement reach the edge of headland after the turn
-	toPoint.x, _, toPoint.z = localToWorld( turnStartNode, 0, 0, - turnInfo.frontMarker + turnInfo.directionNodeToTurnNodeLength)
+	toPoint = turnInfo.turnHelper:getPointAtDistanceFromCornerStart(-turnInfo.frontMarker + turnInfo.directionNodeToTurnNodeLength)
 	-- is this now in front of us? We may not need to drive forward
 	local _, _, dz = worldToLocal( turnInfo.directionNode, toPoint.x, 0, toPoint.z )
 	-- at which waypoint we have to raise the implement
@@ -1722,8 +1715,8 @@ function courseplay.generateTurnTypeHeadlandCornerReverseStraightTractor(vehicle
 	-- in reverse our reference point is the implement's turn node so put the first reverse waypoint behind us
 	fromPoint.x, _, fromPoint.z = localToWorld( turnInfo.directionNode, 0, 0, - turnInfo.directionNodeToTurnNodeLength )
 
-	-- now back up 
-	toPoint.x, _, toPoint.z = localToWorld( turnStartNode, 0, 0, - deltaZC - turnInfo.directionNodeToTurnNodeLength - turnInfo.reverseWPChangeDistance)
+	-- now back up so the tractor is at the start of the arc
+	toPoint = turnInfo.turnHelper:getPointAtDistanceFromArcStart(- turnInfo.directionNodeToTurnNodeLength - turnInfo.reverseWPChangeDistance)
 	courseplay:debug(("%s:(Turn) courseplay:generateTurnTypeHeadlandCornerReverseStraightTractor(), from ( %.2f %.2f ), to ( %.2f %.2f) workWidth: %.1f, raise implement ix: %d"):format(
 		nameNum(vehicle), fromPoint.x, fromPoint.z, toPoint.x, toPoint.z, vehicle.cp.courseWorkWidth, raiseImplementIndex ), 14)
 	courseplay:generateTurnStraightPoints(vehicle, fromPoint, toPoint, true);
@@ -1731,21 +1724,21 @@ function courseplay.generateTurnTypeHeadlandCornerReverseStraightTractor(vehicle
 	vehicle.cp.turnTargets[ raiseImplementIndex ].raiseImplement = true
 
 	-- Generate turn circle (Forward)
-	startDir.x,_,startDir.z = localToWorld( turnStartNode, 0, 0, -deltaZC )
-	stopDir.x, _, stopDir.z = localToWorld( turnInfo.targetNode, 0, 0, deltaZC )
+	local startDir = turnInfo.turnHelper:getArcStart()
+	local stopDir = turnInfo.turnHelper:getArcEnd()
 	courseplay:generateTurnCircle( vehicle, centerForward, startDir, stopDir, turnInfo.turnRadius, turnInfo.direction * -1, true);
 
 	-- Drive forward until our implement reaches the circle end and a bit more so it is hopefully aligned with the tractor
 	-- and we can start reversing more or less straight.
-	toPoint.x, _, toPoint.z = localToWorld( turnInfo.targetNode, 0, 0, deltaZC + turnInfo.directionNodeToTurnNodeLength + turnInfo.wpChangeDistance + 5 )
+	toPoint = turnInfo.turnHelper:getPointAtDistanceFromArcEnd(turnInfo.directionNodeToTurnNodeLength + turnInfo.wpChangeDistance + 5)
 	courseplay:debug(("%s:(Turn) courseplay:generateTurnTypeHeadlandCornerReverseStraightTractor(), from ( %.2f %.2f ), to ( %.2f %.2f)"):format(
 		nameNum(vehicle), fromPoint.x, fromPoint.z, toPoint.x, toPoint.z), 14);
 	courseplay:generateTurnStraightPoints(vehicle, stopDir, toPoint, false, false );
 
 	-- now back up the implement to the edge of the field (or headland)
-	fromPoint.x, _, fromPoint.z = localToWorld( turnInfo.targetNode, 0, 0, deltaZC )
-	toPoint.x, _, toPoint.z = localToWorld( turnInfo.targetNode, 0, 0,
-		- ( vehicle.cp.courseWorkWidth / 2 + turnInfo.directionNodeToTurnNodeLength + turnInfo.frontMarker + turnInfo.reverseWPChangeDistance))
+	fromPoint = turnInfo.turnHelper:getArcEnd()
+	toPoint = turnInfo.turnHelper:getPointAtDistanceFromCornerEnd(
+		(vehicle.cp.courseWorkWidth / 2) - turnInfo.directionNodeToTurnNodeLength - turnInfo.frontMarker - turnInfo.reverseWPChangeDistance)
 	courseplay:generateTurnStraightPoints(vehicle, fromPoint, toPoint, true, false, turnInfo.reverseWPChangeDistance );
 
 	-- lower the implement 
@@ -1753,12 +1746,9 @@ function courseplay.generateTurnTypeHeadlandCornerReverseStraightTractor(vehicle
 
 	--- Finish the turn
 	fromPoint.x, fromPoint.z = toPoint.x, toPoint.z
-	toPoint.x,_,toPoint.z = localToWorld(turnInfo.targetNode, 0, 0, deltaZC + 3 );
+	toPoint = turnInfo.turnHelper:getPointAtDistanceFromArcEnd(3)
 	courseplay:generateTurnStraightPoints(vehicle, stopDir, toPoint, false, true);
-
-	courseplay.destroyNode( turnStartNode )
-end;
-
+end
 
 function courseplay:getTurnCircleTangentIntersectionPoints(cp, np, radius, leftTurn)
 	local point = createTransformGroup("cpTempTurnCircleTangentIntersectionPoint");
@@ -2056,7 +2046,7 @@ function courseplay.createNodeFromNode( name, otherNode )
 end
 
 function courseplay.destroyNode( node )
-	if node then
+	if node and entityExists(node) then
 		unlink( node )
 		delete( node )
 	end
@@ -2235,6 +2225,120 @@ function courseplay:endAlignmentCourse( vehicle )
 	end
 	courseplay:clearTurnTargets( vehicle )
 	vehicle.cp.isTurning = nil
+end
+
+---@class TurnHelper
+TurnHelper = CpObject()
+
+-- @param startAngle the angle we are arriving at the turn start waypoint (not the angle of the turn start wp!)
+-- @param startCpWp legacy Courseplay turn start waypoint
+-- @param startWpIx index of the start waypoint
+-- @param endCpWp legacy Courseplay turn start waypoint
+-- @param endWpIx index of the start waypoint
+function TurnHelper:init(vehicle, startAngle, startCpWp, startWpIx, endCpWp, endWpIx, turnRadius)
+	self.startWp = Waypoint(startCpWp, startWpIx)
+	self.endWp = Waypoint(endCpWp, endWpIx)
+	self.startNode = courseplay.createNode(tostring(self) .. '-cpTurnStartNode', self.startWp.x, self.startWp.z, math.rad(startAngle))
+	self.endNode = courseplay.createNode(tostring(self) .. '-cpTurnEndNode', self.endWp.x, self.endWp.z, math.rad(self.endWp.angle))
+
+	self.alpha = math.pi - (math.rad(self.endWp.angle) - math.rad(startAngle))
+	self.directionChangeDeg = math.deg(getDeltaAngle(math.rad(startAngle), math.rad(self.endWp.angle)))
+	courseplay.debugFormat(14, 'start: %.1f end: %.1f diff: %.1f alpha: %.1f',
+		startAngle, self.endWp.angle, self.directionChangeDeg, math.deg(self.alpha))
+
+	self.turnDirection = self.directionChangeDeg > 0 and 1 or -1
+
+	self:findCornerNodes(startAngle)
+	self:findCircle(turnRadius)
+end
+
+function TurnHelper:delete()
+	courseplay.destroyNode(self.startNode)
+	courseplay.destroyNode(self.endNode)
+	courseplay.destroyNode(self.cornerStartNode)
+	courseplay.destroyNode(self.cornerEndNode)
+end
+
+function TurnHelper:findCornerNodes(startAngle)
+	-- we'll use the actual corner point for most calculations which is the intersection of the
+	-- lines:
+	-- line 1 through startWp at startAngle, and
+	-- line 2 through endWp at endWp.angle
+	-- So go ahead and find that point. First we need to make the lines long enough so they actually intersect1
+	local extensionDistance = 50 -- this should depend on the work width and turn radius
+	-- extend line 1 back and forth
+	local l1x1, _, l1z1 = localToWorld(self.startNode, 0, 0, -extensionDistance)
+	local l1x2, _, l1z2 = localToWorld(self.startNode, 0, 0, extensionDistance)
+	local l2x1, _, l2z1 = localToWorld(self.endNode, 0, 0, -extensionDistance)
+	local l2x2, _, l2z2 = localToWorld(self.endNode, 0, 0, extensionDistance)
+	-- The Giants MathUtil line intersection function is undocumented so use what we have:
+	local is = courseplay:segmentsIntersection(l1x1, l1z1, l1x2, l1z2, l2x1, l2z1, l2x2, l2z2)
+	if is then
+		-- node at the corner, pointing in the direction we are approaching the turn start waypoint
+		self.cornerStartNode = courseplay.createNode(tostring(self) .. '-cpCornerStartNode', is.x, is.z, math.rad(startAngle))
+		-- node at the corner, pointing in the direction we will be leaving the turn end waypoint
+		self.cornerEndNode = courseplay.createNode(tostring(self) .. '-cpCornerStartNode', is.x, is.z, math.rad(self.endWp.angle))
+		courseplay.debugFormat(14, 'corner: %.1f %.1f, startangle: %.1f', is.x, is.z, startAngle)
+	else
+		courseplay.debugFormat(14, 'Could not find turn corner, using turn end waypoint')
+		self.cornerStartNode = self.startNode
+		self.cornerEndNode = self.startNode
+	end
+end
+
+-- Circle (arc) between the start and end lines
+function TurnHelper:findCircle(turnRadius)
+	-- tangent points on the arc
+	local r = turnRadius * 1.1
+	-- distance between the corner and the tangent points
+	self.dCornerToTangentPoints = math.abs(r / math.tan(self.alpha / 2))
+	courseplay.debugFormat(14, 'r=%.1f d=%.1f', r, self.dCornerToTangentPoints)
+	self.arcStart, self.arcEnd, self.center = {}, {}, {}
+	self.arcStart.x, _, self.arcStart.z = localToWorld(self.cornerStartNode, 0, 0, -self.dCornerToTangentPoints)
+	self.arcEnd.x, _, self.arcEnd.z = localToWorld(self.cornerEndNode, 0, 0, self.dCornerToTangentPoints)
+	self.center.x, _, self.center.z = localToWorld(self.cornerEndNode, self.turnDirection * turnRadius, 0, self.dCornerToTangentPoints)
+	courseplay.debugFormat(14, 'arc start: %.1f %.1f, arc end: %.1f %.1f, arc center: %.1f %.1f ',
+		self.arcStart.x, self.arcStart.z, self.arcEnd.x, self.arcEnd.z, self.center.x, self.center.z)
+end
+
+function TurnHelper:getCornerStartNode()
+	return self.cornerStartNode
+end
+
+function TurnHelper:getPointAtDistanceFromCornerStart(d)
+	local x, _, z = localToWorld(self.cornerStartNode, 0, 0, d)
+	return {x = x, z = z}
+end
+
+function TurnHelper:getPointAtDistanceFromArcStart(d)
+	local x, _, z = localToWorld(self.cornerStartNode, 0, 0, d - self.dCornerToTangentPoints)
+	return {x = x, z = z}
+end
+
+function TurnHelper:getPointAtDistanceFromCornerEnd(d)
+	local x, _, z = localToWorld(self.cornerEndNode, 0, 0, d)
+	return {x = x, z = z}
+end
+
+function TurnHelper:getPointAtDistanceFromArcEnd(d)
+	local x, _, z = localToWorld(self.cornerEndNode, 0, 0, d + self.dCornerToTangentPoints)
+	return {x = x, z = z}
+end
+
+function TurnHelper:getCornerEndNode()
+	return self.cornerEndNode
+end
+
+function TurnHelper:getArcStart()
+	return self.arcStart
+end
+
+function TurnHelper:getArcEnd()
+	return self.arcEnd
+end
+
+function TurnHelper:getArcCenter()
+	return self.center
 end
 
 -- do not delete this line
